@@ -7,10 +7,13 @@ import math
 
 app = FastAPI()
 
-# MediaPipe Face Mesh
+# ---------------- GLOBAL ALERT STATE ----------------
+CURRENT_ALERT = "NORMAL"
+
+# ---------------- MEDIAPIPE ----------------
 mp_face_mesh = mp.solutions.face_mesh
 
-# Thresholds
+# ---------------- THRESHOLDS ----------------
 EYE_AR_THRESH = 0.22
 MOUTH_AR_THRESH = 0.45
 
@@ -21,7 +24,9 @@ def euclidean(a, b):
 
 def compute_ear(lm, idx):
     p = [(lm[i].x, lm[i].y) for i in idx]
-    return (euclidean(p[1], p[5]) + euclidean(p[2], p[4])) / (2 * euclidean(p[0], p[3]))
+    return (euclidean(p[1], p[5]) + euclidean(p[2], p[4])) / (
+        2 * euclidean(p[0], p[3])
+    )
 
 def mouth_ratio(lm, top_idx=13, bottom_idx=14, ref=1.0):
     t = (lm[top_idx].x, lm[top_idx].y)
@@ -29,19 +34,29 @@ def mouth_ratio(lm, top_idx=13, bottom_idx=14, ref=1.0):
     return euclidean(t, b) / ref if ref != 0 else 0
 
 
-# ---------------- ROOT HEALTH CHECK ----------------
+# ---------------- ROOT CHECK ----------------
 @app.get("/")
 def root():
     return {
         "status": "AlertMate API is running",
-        "endpoint": "/detect",
-        "method": "POST"
+        "detect_endpoint": "/detect",
+        "status_endpoint": "/status"
     }
 
 
-# ---------------- DETECTION API ----------------
+# ---------------- STATUS API (FOR MOBILE APP) ----------------
+@app.get("/status")
+def get_status():
+    return {
+        "alert": CURRENT_ALERT
+    }
+
+
+# ---------------- DETECTION API (ESP32 CALLS THIS) ----------------
 @app.post("/detect")
 async def detect(file: UploadFile = File(...)):
+    global CURRENT_ALERT
+
     contents = await file.read()
 
     # Decode image
@@ -49,11 +64,11 @@ async def detect(file: UploadFile = File(...)):
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
     if frame is None:
-        return JSONResponse({"error": "Invalid image"}, status_code=400)
+        CURRENT_ALERT = "NORMAL"
+        return JSONResponse({"alert": CURRENT_ALERT})
 
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    # FaceMesh detection
     with mp_face_mesh.FaceMesh(
         static_image_mode=True,
         max_num_faces=1,
@@ -63,7 +78,8 @@ async def detect(file: UploadFile = File(...)):
         result = face_mesh.process(rgb)
 
         if not result.multi_face_landmarks:
-            return JSONResponse({"alert": "NORMAL"})
+            CURRENT_ALERT = "NORMAL"
+            return JSONResponse({"alert": CURRENT_ALERT})
 
         lm = result.multi_face_landmarks[0].landmark
 
@@ -82,9 +98,12 @@ async def detect(file: UploadFile = File(...)):
 
         mar = mouth_ratio(lm, ref=ref)
 
+        # ---------------- DECISION ----------------
         if ear < EYE_AR_THRESH:
-            return JSONResponse({"alert": "EYE_CLOSED"})
+            CURRENT_ALERT = "EYE_CLOSED"
         elif mar > MOUTH_AR_THRESH:
-            return JSONResponse({"alert": "YAWNING"})
+            CURRENT_ALERT = "YAWNING"
         else:
-            return JSONResponse({"alert": "NORMAL"})
+            CURRENT_ALERT = "NORMAL"
+
+        return JSONResponse({"alert": CURRENT_ALERT})
