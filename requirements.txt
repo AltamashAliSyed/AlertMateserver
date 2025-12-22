@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+opencv-python
+mediapipe
+numpy==1.26.4
+python-multipart
