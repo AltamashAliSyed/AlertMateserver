@@ -1,24 +1,23 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
-import cv2
-import numpy as np
-import mediapipe as mp
-import math
+import cv2, numpy as np, mediapipe as mp, math, time
 
 app = FastAPI()
 
-# ---------------- GLOBAL ALERT STATE ----------------
 CURRENT_ALERT = "NORMAL"
+LAST_UPDATE = time.time()
 
-# ---------------- MEDIAPIPE ----------------
 mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=True,
+    max_num_faces=1,
+    refine_landmarks=True
+)
 
-# ---------------- THRESHOLDS ----------------
 EYE_AR_THRESH = 0.22
 MOUTH_AR_THRESH = 0.45
 
 
-# ---------------- UTILS ----------------
 def euclidean(a, b):
     return math.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
 
@@ -34,7 +33,6 @@ def mouth_ratio(lm, top_idx=13, bottom_idx=14, ref=1.0):
     return euclidean(t, b) / ref if ref != 0 else 0
 
 
-# ---------------- ROOT CHECK ----------------
 @app.get("/")
 def root():
     return {
@@ -44,66 +42,52 @@ def root():
     }
 
 
-# ---------------- STATUS API (FOR MOBILE APP) ----------------
 @app.get("/status")
 def get_status():
-    return {
-        "alert": CURRENT_ALERT
-    }
+    global CURRENT_ALERT
+    if time.time() - LAST_UPDATE > 5:
+        CURRENT_ALERT = "NORMAL"
+    return {"alert": CURRENT_ALERT}
 
 
-# ---------------- DETECTION API (ESP32 CALLS THIS) ----------------
 @app.post("/detect")
 async def detect(file: UploadFile = File(...)):
-    global CURRENT_ALERT
+    global CURRENT_ALERT, LAST_UPDATE
 
     contents = await file.read()
-
-    # Decode image
-    nparr = np.frombuffer(contents, np.uint8)
-    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    frame = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
 
     if frame is None:
         CURRENT_ALERT = "NORMAL"
-        return JSONResponse({"alert": CURRENT_ALERT})
+        return {"alert": CURRENT_ALERT}
 
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    result = face_mesh.process(rgb)
 
-    with mp_face_mesh.FaceMesh(
-        static_image_mode=True,
-        max_num_faces=1,
-        refine_landmarks=True
-    ) as face_mesh:
+    if not result.multi_face_landmarks:
+        CURRENT_ALERT = "NORMAL"
+        return {"alert": CURRENT_ALERT}
 
-        result = face_mesh.process(rgb)
+    lm = result.multi_face_landmarks[0].landmark
 
-        if not result.multi_face_landmarks:
-            CURRENT_ALERT = "NORMAL"
-            return JSONResponse({"alert": CURRENT_ALERT})
+    LEFT_EYE  = [33, 160, 158, 133, 153, 144]
+    RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 
-        lm = result.multi_face_landmarks[0].landmark
+    ear = (compute_ear(lm, LEFT_EYE) + compute_ear(lm, RIGHT_EYE)) / 2
 
-        LEFT_EYE  = [33, 160, 158, 133, 153, 144]
-        RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+    ref = euclidean(
+        (lm[LEFT_EYE[0]].x, lm[LEFT_EYE[0]].y),
+        (lm[LEFT_EYE[3]].x, lm[LEFT_EYE[3]].y)
+    )
 
-        ear = (
-            compute_ear(lm, LEFT_EYE) +
-            compute_ear(lm, RIGHT_EYE)
-        ) / 2
+    mar = mouth_ratio(lm, ref=ref)
 
-        ref = euclidean(
-            (lm[LEFT_EYE[0]].x, lm[LEFT_EYE[0]].y),
-            (lm[LEFT_EYE[3]].x, lm[LEFT_EYE[3]].y)
-        )
+    if ear < EYE_AR_THRESH:
+        CURRENT_ALERT = "EYE_CLOSED"
+    elif mar > MOUTH_AR_THRESH:
+        CURRENT_ALERT = "YAWNING"
+    else:
+        CURRENT_ALERT = "NORMAL"
 
-        mar = mouth_ratio(lm, ref=ref)
-
-        # ---------------- DECISION ----------------
-        if ear < EYE_AR_THRESH:
-            CURRENT_ALERT = "EYE_CLOSED"
-        elif mar > MOUTH_AR_THRESH:
-            CURRENT_ALERT = "YAWNING"
-        else:
-            CURRENT_ALERT = "NORMAL"
-
-        return JSONResponse({"alert": CURRENT_ALERT})
+    LAST_UPDATE = time.time()
+    return {"alert": CURRENT_ALERT}
