@@ -1,14 +1,17 @@
 from fastapi import FastAPI, UploadFile, File
 import cv2
 import numpy as np
-import time
+import mediapipe as mp
 import math
-
-from mediapipe.python.solutions.face_mesh import FaceMesh
+import time
 
 app = FastAPI()
 
-face_mesh = FaceMesh(
+CURRENT_ALERT = "NORMAL"
+
+# MediaPipe setup
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=False,
     max_num_faces=1,
     refine_landmarks=True
@@ -16,13 +19,10 @@ face_mesh = FaceMesh(
 
 EYE_AR_THRESH = 0.22
 MOUTH_AR_THRESH = 0.45
-
-EYE_TIME_THRESHOLD = 3.0   # seconds
-YAWN_TIME_THRESHOLD = 3.0 # seconds
+ALERT_DURATION = 3.0  # seconds
 
 eye_start = None
 yawn_start = None
-CURRENT_ALERT = "NORMAL"
 
 def euclidean(a, b):
     return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2)
@@ -40,7 +40,7 @@ def mouth_ratio(lm, ref):
 
 @app.get("/")
 def root():
-    return {"status": "AlertMate Cloud Running"}
+    return {"status": "AlertMate API running"}
 
 @app.get("/status")
 def status():
@@ -48,10 +48,11 @@ def status():
 
 @app.post("/detect")
 async def detect(file: UploadFile = File(...)):
-    global eye_start, yawn_start, CURRENT_ALERT
+    global CURRENT_ALERT, eye_start, yawn_start
 
     contents = await file.read()
-    frame = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
+    img = np.frombuffer(contents, np.uint8)
+    frame = cv2.imdecode(img, cv2.IMREAD_COLOR)
 
     if frame is None:
         CURRENT_ALERT = "NORMAL"
@@ -81,16 +82,18 @@ async def detect(file: UploadFile = File(...)):
     now = time.time()
 
     if ear < EYE_AR_THRESH:
-        eye_start = eye_start or now
-        if now - eye_start >= EYE_TIME_THRESHOLD:
+        if eye_start is None:
+            eye_start = now
+        elif now - eye_start >= ALERT_DURATION:
             CURRENT_ALERT = "EYE_CLOSED"
             return {"alert": CURRENT_ALERT}
     else:
         eye_start = None
 
     if mar > MOUTH_AR_THRESH:
-        yawn_start = yawn_start or now
-        if now - yawn_start >= YAWN_TIME_THRESHOLD:
+        if yawn_start is None:
+            yawn_start = now
+        elif now - yawn_start >= ALERT_DURATION:
             CURRENT_ALERT = "YAWNING"
             return {"alert": CURRENT_ALERT}
     else:
