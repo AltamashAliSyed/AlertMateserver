@@ -1,14 +1,14 @@
 from fastapi import FastAPI, UploadFile, File
 import cv2
 import numpy as np
-import mediapipe as mp
-import math
 import time
+import math
+
+from mediapipe.python.solutions.face_mesh import FaceMesh
 
 app = FastAPI()
 
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
+face_mesh = FaceMesh(
     static_image_mode=False,
     max_num_faces=1,
     refine_landmarks=True
