@@ -16,11 +16,14 @@ DEVICE_REGISTRY = {}  # device_id -> esp_ip
 eye_start = None
 yawn_start = None
 
+LAST_ALERT_TIME = 0
+ALERT_COOLDOWN = 5  # seconds (prevents buzzer spam)
+
 ALERT_DURATION = 3.0  # seconds
 EYE_AR_THRESH = 0.22
 MOUTH_AR_THRESH = 0.45
 
-# ================= MEDIAPIPE (CPU SAFE) =================
+# ================= MEDIAPIPE =================
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=False,
@@ -30,7 +33,7 @@ face_mesh = mp_face_mesh.FaceMesh(
 
 # ================= UTILS =================
 def euclidean(a, b):
-    return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2)
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
 
 def compute_ear(lm, idx):
     p = [(lm[i].x, lm[i].y) for i in idx]
@@ -46,11 +49,17 @@ def mouth_ratio(lm, ref):
 def trigger_esp(device_id):
     esp_ip = DEVICE_REGISTRY.get(device_id)
     if not esp_ip:
+        print("ESP not registered for device:", device_id)
         return
+
     try:
-        requests.get(f"http://{esp_ip}/alert", timeout=1)
-    except:
-        pass
+        requests.post(
+            f"http://{esp_ip}/alert",
+            timeout=1
+        )
+        print("ESP ALERT SENT:", esp_ip)
+    except Exception as e:
+        print("ESP ALERT FAILED:", e)
 
 # ================= ROUTES =================
 @app.get("/")
@@ -67,7 +76,7 @@ async def register_device(data: dict):
     Body:
     {
       "device_id": "driver123",
-      "esp_ip": "192.168.4.1"
+      "esp_ip": "192.168.1.25"
     }
     """
     DEVICE_REGISTRY[data["device_id"]] = data["esp_ip"]
@@ -78,7 +87,7 @@ async def detect(
     file: UploadFile = File(...),
     device_id: str = "driver123"
 ):
-    global CURRENT_ALERT, eye_start, yawn_start
+    global CURRENT_ALERT, eye_start, yawn_start, LAST_ALERT_TIME
 
     contents = await file.read()
     img = np.frombuffer(contents, np.uint8)
@@ -99,14 +108,16 @@ async def detect(
 
     lm = result.multi_face_landmarks[0].landmark
 
-    LEFT = [33,160,158,133,153,144]
-    RIGHT = [362,385,387,263,373,380]
+    LEFT = [33, 160, 158, 133, 153, 144]
+    RIGHT = [362, 385, 387, 263, 373, 380]
 
     ear = (compute_ear(lm, LEFT) + compute_ear(lm, RIGHT)) / 2
+
     ref = euclidean(
         (lm[LEFT[0]].x, lm[LEFT[0]].y),
         (lm[LEFT[3]].x, lm[LEFT[3]].y)
     )
+
     mar = mouth_ratio(lm, ref)
 
     now = time.time()
@@ -116,8 +127,10 @@ async def detect(
         if eye_start is None:
             eye_start = now
         elif now - eye_start >= ALERT_DURATION:
-            CURRENT_ALERT = "EYE_CLOSED"
-            trigger_esp(device_id)
+            if now - LAST_ALERT_TIME >= ALERT_COOLDOWN:
+                CURRENT_ALERT = "EYE_CLOSED"
+                LAST_ALERT_TIME = now
+                trigger_esp(device_id)
             return {"alert": CURRENT_ALERT}
     else:
         eye_start = None
@@ -127,8 +140,10 @@ async def detect(
         if yawn_start is None:
             yawn_start = now
         elif now - yawn_start >= ALERT_DURATION:
-            CURRENT_ALERT = "YAWNING"
-            trigger_esp(device_id)
+            if now - LAST_ALERT_TIME >= ALERT_COOLDOWN:
+                CURRENT_ALERT = "YAWNING"
+                LAST_ALERT_TIME = now
+                trigger_esp(device_id)
             return {"alert": CURRENT_ALERT}
     else:
         yawn_start = None
